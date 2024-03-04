@@ -8,13 +8,37 @@
 #include <vector>
 #include <bits/stdc++.h>
 
+#include <iostream>
+#include <cstdlib>
+#include <cxxabi.h>
+
 #ifndef container_of
 #define container_of(ptr, type, member) ({                                  \
     const decltype( ((type *)0)->member )                                   \
-    *__mptr = (ptr);                                                        \
-    reinterpret_cast<type *>( (uint8_t *)__mptr - offsetof(type,member) );})
+    *_mptr = (ptr);                                                        \
+    reinterpret_cast<type *>( (uint8_t *)_mptr - offsetof(type,member) );})
 #endif // container_of
 
+
+// #define __USE_GNU
+#include <dlfcn.h>
+#include <execinfo.h>
+
+const char *getCaller(void) {
+    void *callstack[3];
+    const int maxFrames = sizeof(callstack) / sizeof(callstack[0]);
+    Dl_info info;
+
+    backtrace(callstack, maxFrames);
+
+    if (dladdr(callstack[2], &info) && info.dli_sname != NULL) {
+        // printf("I was called from: %s\n", info.dli_sname);
+        return info.dli_sname;
+        // printf("Unable to determine calling function\n");
+    } else {
+        return "<?>";
+    }
+}
 
 using std::atomic_size_t;
 using std::move;
@@ -40,11 +64,11 @@ void ArcAllocationErrorHandler(void) {
 
 template<typename T, deleter_t default_deleter = free> struct Arc {
     Arc() : ptr(nullptr) {
-        printf("empty constructor called\nthe pointer from the empty constructor should be: %p\n", this->ptr);
+        printf("empty constructor called\n the pointer from the empty constructor should be: %p\n", this->ptr);
     }
 
     Arc(T &x) : ptr(nullptr) {
-        printf("reference constructor called\n");
+        printf("referce constructor called\n");
         this->ptr = reinterpret_cast<T *>((uint8_t *)malloc(sizeof(refcount_t<T>)) + offsetof(refcount_t<T>, data));
         if(this->ptr == reinterpret_cast<T *>((uint8_t *)nullptr + offsetof(refcount_t<T>, data))) {
             ArcAllocationErrorHandler();
@@ -66,7 +90,25 @@ template<typename T, deleter_t default_deleter = free> struct Arc {
     }
 
     Arc(initializer_list<T> x) {
-        constructArcFromInitList(x);
+
+        this->ptr = reinterpret_cast<T *>((uint8_t *)malloc(sizeof(refcount_t<T>)) + offsetof(refcount_t<T>, data));
+        if(this->ptr == reinterpret_cast<T *>((uint8_t *)nullptr + offsetof(refcount_t<T>, data))) {
+            ArcAllocationErrorHandler();
+        }
+        
+        container_of(this->ptr, refcount_t<T>, data)->refs = {1};
+        container_of(this->ptr, refcount_t<T>, data)->deleter = default_deleter;
+        new(this->ptr) T(x);
+        
+        printf("handed out address is %p\n", container_of(this->ptr, refcount_t<T>, data));
+        
+        static size_t counter = 0;
+        size_t buff_len = 512;
+        static char *i_need_a_buffer = (char *)malloc(buff_len);
+        int status;
+        int *status_p = &status;
+        printf("called %ld times\n", ++counter);
+        printf("%s has been called from %s\n", __PRETTY_FUNCTION__, abi::__cxa_demangle(getCaller(), i_need_a_buffer, &buff_len, &status));
     }
     
     Arc(const Arc<T> &x) : ptr(nullptr) {
@@ -90,19 +132,16 @@ template<typename T, deleter_t default_deleter = free> struct Arc {
         return to_return;
     }
 
-
     void constructArcFromInitList(initializer_list<T> x) {
-        container_of(this->ptr, refcount_t<T>, data) = static_cast<T *>(malloc(sizeof(refcount_t<T>)) + offsetof(refcount_t<T>, data));
-        if(this->ptr == reinterpret_cast<T *>((uint8_t *)nullptr + offsetof(refcount_t<T>, data))) {
-            ArcAllocationErrorHandler();
-        }
-        printf("handed out address is %p\n", container_of(this->ptr, refcount_t<T>, data));
-        container_of(this->ptr, refcount_t<T>, data)->refs = {1};
-        new(this->ptr) T(x);
+        
     }
     
     T operator*() {
         return *(this->ptr);
+    }
+
+    T *operator->() {
+        return this->getPtr();
     }
 
 #pragma region relational_operators
@@ -160,7 +199,7 @@ template<typename T, deleter_t default_deleter = free> struct Arc {
     }
 
     ~Arc() {
-        printf("dropping arc data from destructor\n");
+        printf("dropping  destructor\n");
         drop();
     }
     T *getPtr() {
@@ -174,8 +213,8 @@ template<typename T, deleter_t default_deleter = free> struct Arc {
                 printf("the ref count is currently %ld\n", (size_t) container_of(this->ptr, refcount_t<T>, data)->refs);
                 if(--(container_of(this->ptr, refcount_t<T>, data)->refs) == 0) {
                     this->ptr->~T();
-                    container_of(this->ptr, refcount_t<T>, data)->deleter(container_of(this->ptr, refcount_t<T>, data));
                     printf("dropping pointer %p\n", container_of(this->ptr, refcount_t<T>, data));
+                    container_of(this->ptr, refcount_t<T>, data)->deleter(container_of(this->ptr, refcount_t<T>, data));
                     this->ptr = nullptr;    
                 }
             } else {
@@ -192,6 +231,7 @@ void printdestructor(void *x) {
 struct foo {
     Arc<int> a;
     Arc<int> b;
+    int c = 12;
     string damn;
     foo(string init, int i1, int i2) {
         a = Arc(i1);
@@ -206,14 +246,20 @@ struct foo {
     }
 };
 
+struct node {
+    Arc<node> next;
+    std::string content;
+    node() {}
+    node(std::string content) : content(content) {}
+    node(Arc<node> next) : next(next) {}
+};
+
 int main() {
-    Arc<int> test;
-    printf("test points to %p\n", test.getPtr());
-    printf("test size %ld\n", sizeof(test));
-    test = Arc(5);
-    printf("the pointer to T is %p\n", test);
-    printf("which should be the same as %p\n", test.getPtr());
-    // auto test4 = foo("hello", 2, 3);
-    printf("\n\nend of main function\n\n\n");
+    auto nptr1 = Arc<node>({"test1"});
+    auto nptr2 = Arc<node>({"test2"});
+    nptr1->next = nptr2;
+    nptr2->next = nptr1;
+    nptr1 = nullptr;
+    nptr2 = nullptr;
     return 0;
 }
